@@ -1,0 +1,128 @@
+name: Build Realtek r8125 driver for OpenWrt
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      ssh:
+        description: 'SSH connection to Actions'
+        required: false
+        default: 'false'
+  push:
+    branches:
+      - main
+  # schedule:
+  #   - cron: "0 0 * * MON"
+
+
+env:
+  RELEASE_URL: https://gist.githubusercontent.com/csrutil/a448f7d1e9d6f0b8487fabd45dfc759f/raw/26642dc5b5a35cc954e14c7cd5edea8f197dc30d/OpenWrt-NIC-Drivers-release.txt
+  KMOD_VERSION: 9.011.01
+  APT_URL: https://gist.githubusercontent.com/csrutil/6d83b7dd62b5652697fe22271fbee482/raw/5149abcc3ca3ee48f95978949db528d6bf765daa/depends-ubuntu-2004
+
+jobs:
+  build_r8125_Modules:
+    runs-on: ubuntu-20.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk_url:
+          - https://downloads.openwrt.org/releases/23.05.0/targets/x86/64/openwrt-sdk-23.05.0-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Initialization Environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install $(curl -fsSL $APT_URL) tree
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+
+    - name: Download SDK
+      run: |
+        url=${{ matrix.sdk_url }}
+        sdk=$(basename $url | awk -F '.tar.xz' '{ print $1 }')
+
+        wget $url
+        tar xvf $sdk.tar.xz
+
+        mkdir -p $sdk/package
+        cp -r r8125 $sdk/package/
+
+    - name: Compile
+      run: |
+        url=${{ matrix.sdk_url }}
+        sdk=$(basename $url | awk -F '.tar.xz' '{ print $1 }')
+
+        cd $sdk
+        echo 'CONFIG_PACKAGE_kmod-r8125=m' > .config
+        make defconfig
+        
+        make package/r8125/compile -j$(nproc) || make package/r8125/compile -j1 V=sc || exit 0
+
+        # cp file to artifact
+        cd ${{ github.workspace }}
+        mkdir -p ${{ github.workspace }}/artifact
+
+        for ipk in `find . -name 'kmod-r8125*.ipk'`; do
+          cp $ipk ${{ github.workspace }}/artifact
+        done
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v2
+      with:
+        name: ${{ env.KMOD_VERSION }}
+        path: ${{ github.workspace }}/artifact/**/*
+
+  deploy:
+    needs: [build_r8125_Modules]
+    name: Create release and upload artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Download build artifacts
+      uses: actions/download-artifact@v2
+      with:
+        name: ${{ env.KMOD_VERSION }}
+
+    - name: Upload build artifacts to cloud
+      run: |
+        mkdir -p ${{ github.workspace }}/artifact
+        for ipk in `find . -name '*.ipk'`; do
+          mv $ipk ${{ github.workspace }}/artifact
+        done
+        cd artifact && md5sum *.ipk > md5sum.txt
+        cd ..
+
+        wget -O release.txt $RELEASE_URL
+        echo -e "\nUpdated at $(date)" >> release.txt
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        name: ${{ env.KMOD_VERSION }}
+        tag_name: ${{ env.KMOD_VERSION }}
+        body_path: release.txt
+        files: artifact/**/*
+
+    - name: Remove old Releases
+      uses: dev-drprasad/delete-older-releases@v0.2.0
+      with:
+        keep_latest: 2
+        delete_tags: true
+        delete_tag_pattern: ${{ env.KMOD_VERSION }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Delete Artifacts
+      uses: geekyeggo/delete-artifact@v1
+      with:
+        name: ${{ env.KMOD_VERSION }}
