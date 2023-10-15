@@ -48,6 +48,8 @@ ENABLE_RSS_SUPPORT = y
 ENABLE_LIB_SUPPORT = n
 ENABLE_USE_FIRMWARE_FILE = n
 
+ccflags-y += -Wno-implicit-fallthrough
+
 ifneq ($(KERNELRELEASE),)
 	obj-m := r8125.o
 	r8125-objs := r8125_n.o rtl_eeprom.o rtltool.o
